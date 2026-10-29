@@ -3,13 +3,16 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"automation-developer-guide/src/config"
 	"automation-developer-guide/src/database"
 	"automation-developer-guide/src/models"
+	"automation-developer-guide/src/ondc"
 	"automation-developer-guide/src/utils"
 
 	"github.com/gofiber/fiber/v2"
@@ -33,15 +36,22 @@ func HandleMe(c *fiber.Ctx) error {
 	avatarURL, _ := c.Locals("avatar_url").(string)
 	firstName, _ := c.Locals("first_name").(string)
 	lastName, _ := c.Locals("last_name").(string)
+	authProvider, _ := c.Locals("auth_provider").(string)
+	orgID, _ := c.Locals("org_id").(string)
+	orgName, _ := c.Locals("org_name").(string)
 	return c.JSON(fiber.Map{
 		"ok": true,
 		"user": fiber.Map{
-			"githubId":  userID,
-			"username":  username,
-			"email":     email,
-			"avatarUrl": avatarURL,
-			"firstName": firstName,
-			"lastName":  lastName,
+			// githubId holds our own user ID; the name stays until the website stops reading it.
+			"githubId":         userID,
+			"username":         username,
+			"email":            email,
+			"avatarUrl":        avatarURL,
+			"firstName":        firstName,
+			"lastName":         lastName,
+			"authProvider":     authProvider,
+			"organisationId":   orgID,
+			"organisationName": orgName,
 		},
 	})
 }
@@ -52,6 +62,12 @@ func HandleLogin(c *fiber.Ctx) error {
 	c.Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
 	c.Set("Pragma", "no-cache")
 	c.Set("Expires", "0")
+
+	// ONDC's login link takes no state or return address: ONDC always sends the
+	// user to the callback registered for this client ID.
+	if config.LoginProvider == config.LoginProviderONDC {
+		return c.Redirect(ondc.LoginURL(config.ONDCPortalBaseURL, config.ONDCClientID), fiber.StatusSeeOther)
+	}
 
 	// 1. Generate a random state string to prevent CSRF
 	state, err := utils.GenerateRandomState()
@@ -192,7 +208,13 @@ func HandleCallback(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to generate token")
 	}
 
-	// 5. Generate and store an exchange code for secure token relay
+	return redirectWithExchangeCode(c, jwtToken)
+}
+
+// redirectWithExchangeCode hands the Workbench token to the website the same way
+// for every login provider: store it behind a short-lived one-time code and send
+// the browser to the website with that code.
+func redirectWithExchangeCode(c *fiber.Ctx, jwtToken string) error {
 	exchangeCode, err := utils.GenerateRandomState()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to generate exchange code")
@@ -208,7 +230,6 @@ func HandleCallback(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to store exchange code")
 	}
 
-	// 6. Redirect with exchange code in query parameter
 	redirectURL := config.ClientURL
 	if strings.Contains(redirectURL, "?") {
 		redirectURL += "&code=" + exchangeCode
@@ -217,6 +238,138 @@ func HandleCallback(c *fiber.Ctx) error {
 	}
 
 	return c.Redirect(redirectURL, fiber.StatusSeeOther)
+}
+
+// HandleLoginProvider tells the website which login is on, so the button text
+// always matches LOGIN_PROVIDER.
+func HandleLoginProvider(c *fiber.Ctx) error {
+	// Not cached: after a switch the button must change on the next page load.
+	c.Set("Cache-Control", "no-cache")
+	return c.JSON(fiber.Map{"provider": config.LoginProvider})
+}
+
+const ondcLoginFailedMessage = "We could not complete Login via ONDC. Please try again or contact support."
+
+// HandleONDCCallback is where ONDC sends the browser after login. It swaps the
+// one-time code for the user's details, saves the user and logs them in.
+func HandleONDCCallback(c *fiber.Ctx) error {
+	c.Set("Cache-Control", "no-store")
+	ref := newRef()
+	fail := func(status int, reason string) error {
+		// ref ties the message the user sees to this log line. Never log the code or the secret.
+		log.Printf("ondc login failed ref=%s: %s", ref, reason)
+		return c.Status(status).SendString(ondcLoginFailedMessage + " (ref " + ref + ")")
+	}
+
+	if config.LoginProvider != config.LoginProviderONDC {
+		return fail(fiber.StatusNotFound, "LOGIN_PROVIDER is not ondc")
+	}
+	code := c.Query("code")
+	if !ondc.ValidCode(code) {
+		return fail(fiber.StatusBadRequest, "missing or malformed code")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	info, err := ondc.NewClient(config.ONDCAPIBaseURL, config.ONDCClientID, config.ONDCClientSecret).Exchange(ctx, code)
+	if err != nil {
+		status := fiber.StatusBadGateway
+		if e, ok := ondc.IsExchangeError(err); ok {
+			switch e.Kind {
+			case ondc.KindInvalidCode:
+				status = fiber.StatusBadRequest
+			case ondc.KindRateLimited:
+				status = fiber.StatusTooManyRequests
+			}
+		}
+		return fail(status, err.Error())
+	}
+
+	user, err := saveONDCUser(info)
+	if err != nil {
+		return fail(fiber.StatusInternalServerError, "saving user: "+err.Error())
+	}
+
+	// All organisations are saved on the user. Until Product decides how a user
+	// with several picks one, the first goes into the token.
+	extra := map[string]interface{}{"auth_provider": config.LoginProviderONDC, "ondc_user_id": info.UserID}
+	if len(info.Organisations) > 0 {
+		org := info.Organisations[0]
+		extra["org_id"] = org.OrgID()
+		extra["org_name"] = org.OrganisationName
+	}
+	// The website links sessions and reports to username, so it must be unique
+	// and permanent: the ONDC user ID. The header shows first and last name.
+	username := strconv.FormatInt(info.UserID, 10)
+	jwtToken, err := utils.GenerateJWTWithExtra(user.ID.Hex(), info.Email, username, "", info.FirstName, info.LastName, extra)
+	if err != nil {
+		return fail(fiber.StatusInternalServerError, "generating token")
+	}
+
+	return redirectWithExchangeCode(c, jwtToken)
+}
+
+// newRef returns a short random tag for one login attempt.
+func newRef() string {
+	r, err := utils.GenerateRandomState()
+	if err != nil || len(r) < 8 {
+		return "noref"
+	}
+	return r[:8]
+}
+
+// saveONDCUser finds the user by ONDC user ID, or else a GitHub-only user with
+// the same email (so they keep their notes and preferences), and saves the
+// latest details from ONDC.
+func saveONDCUser(info *ondc.UserInfo) (*models.User, error) {
+	orgs := make([]models.UserOrganisation, 0, len(info.Organisations))
+	for _, o := range info.Organisations {
+		orgs = append(orgs, models.UserOrganisation{
+			OrganisationID:   o.OrgID(),
+			OrganisationName: o.OrganisationName,
+			NetworkStatus:    string(o.NetworkStatus),
+			ParticipantID:    o.ParticipantID,
+			NPType:           o.NPType,
+			IsRepresentative: o.IsRepresentative,
+			Status:           o.Status,
+			SubscriberIDs:    o.SubscriberIDs,
+		})
+	}
+	set := bson.M{
+		"auth_provider": config.LoginProviderONDC,
+		"ondc_user_id":  info.UserID,
+		"email":         info.Email,
+		"first_name":    info.FirstName,
+		"last_name":     info.LastName,
+		"name":          strings.TrimSpace(info.FirstName + " " + info.LastName),
+		"ondc_status":   info.Status,
+		"organisations": orgs,
+		"last_login_at": time.Now().UTC(),
+	}
+
+	var existing models.User
+	filter := bson.M{"ondc_user_id": info.UserID}
+	err := database.FindOne("users", filter, &existing)
+	if err == mongo.ErrNoDocuments && info.Email != "" {
+		// Only a row with no ONDC ID: never take over another ONDC user's row.
+		filter = bson.M{"email": info.Email, "ondc_user_id": bson.M{"$exists": false}}
+		err = database.FindOne("users", filter, &existing)
+	}
+	switch {
+	case err == nil:
+		if _, err := database.UpdateOne("users", bson.M{"_id": existing.ID}, bson.M{"$set": set}); err != nil {
+			return nil, err
+		}
+		return &existing, nil
+	case err == mongo.ErrNoDocuments:
+		set["_id"] = primitive.NewObjectID()
+		if _, err := database.CreateOne("users", set); err != nil {
+			return nil, err
+		}
+		return &models.User{ID: set["_id"].(primitive.ObjectID)}, nil
+	default:
+		return nil, err
+	}
 }
 
 // HandleExchangeToken exchanges a short-lived code for a JWT token
@@ -258,7 +411,6 @@ func HandleExchangeToken(c *fiber.Ctx) error {
 		"token": codeData.JWTToken,
 	})
 }
-
 
 func splitName(name string) (string, string) {
 	parts := strings.SplitN(strings.TrimSpace(name), " ", 2)

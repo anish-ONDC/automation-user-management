@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
@@ -17,6 +18,14 @@ var (
 	CookieDomain string
 	JWTSecret    string
 	StateKey     = "oauth-state"
+
+	// Login via ONDC. The client secret must stay server side (never logged,
+	// never sent to the browser).
+	LoginProvider     string
+	ONDCPortalBaseURL string
+	ONDCAPIBaseURL    string
+	ONDCClientID      string
+	ONDCClientSecret  string
 
 	// MCP API keys. MCPKeyTTLDays must stay in step with section 3 of the MCP
 	// consent document, which tells the user how long their key lasts; changing
@@ -46,6 +55,11 @@ var (
 )
 
 const (
+	LoginProviderGitHub = "github"
+	LoginProviderONDC   = "ondc"
+)
+
+const (
 	defaultMCPKeyTTLDays     = 90
 	defaultMCPConsentVersion = "2026-10-v1"
 	defaultRedisPort         = "6379"
@@ -70,6 +84,25 @@ func Load() {
 		RedirectURL:  os.Getenv("GITHUB_REDIRECT_URL"),
 		Scopes:       []string{"read:user", "user:email"},
 		Endpoint:     github.Endpoint,
+	}
+
+	// 3b. Login via ONDC (SSO Onboarding Guide v1.2). GitHub stays the default so
+	// a deploy without the ONDC secrets keeps working until LOGIN_PROVIDER=ondc.
+	LoginProvider = strings.ToLower(strings.TrimSpace(os.Getenv("LOGIN_PROVIDER")))
+	switch LoginProvider {
+	case LoginProviderGitHub, LoginProviderONDC:
+	case "":
+		LoginProvider = LoginProviderGitHub
+	default:
+		log.Printf("Warning: unknown LOGIN_PROVIDER %q, using github", LoginProvider)
+		LoginProvider = LoginProviderGitHub
+	}
+	ONDCPortalBaseURL = strings.TrimRight(os.Getenv("ONDC_PORTAL_BASE_URL"), "/")
+	ONDCAPIBaseURL = strings.TrimRight(os.Getenv("ONDC_API_BASE_URL"), "/")
+	ONDCClientID = os.Getenv("ONDC_SSO_CLIENT_ID")
+	ONDCClientSecret = os.Getenv("ONDC_SSO_CLIENT_SECRET")
+	if LoginProvider == LoginProviderONDC && (ONDCPortalBaseURL == "" || ONDCAPIBaseURL == "" || ONDCClientID == "" || ONDCClientSecret == "") {
+		log.Println("Warning: LOGIN_PROVIDER=ondc but an ONDC_* setting is missing; Login via ONDC will fail")
 	}
 
 	ClientURL = os.Getenv("CLIENT_URL")

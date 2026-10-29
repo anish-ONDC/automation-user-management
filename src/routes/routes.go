@@ -13,6 +13,8 @@ func Setup(app *fiber.App) {
 	app.Get("/health", handlers.HandleHealth)
 	app.Get("/login", handlers.HandleLogin)
 	app.Get("/auth/github/callback", handlers.HandleCallback)
+	app.Get("/auth/ondc/callback", handlers.HandleONDCCallback)
+	app.Get("/auth/provider", handlers.HandleLoginProvider)
 	app.Post("/auth/exchange", handlers.HandleExchangeToken)
 
 	// MCP API key verification -- called by the MCP server, never by a browser.
@@ -25,8 +27,6 @@ func Setup(app *fiber.App) {
 	// browser preflight can never satisfy this route. Do not "fix" that.
 	app.Post("/mcp/verify", middleware.MCPVerifyLimiter(), middleware.RequireServiceToken, handlers.HandleVerifyMCPKey)
 
-
-	
 	// Comments (Public)
 	app.Get("api/comments", handlers.HandleGetComments)
 	app.Get("api/comments/:id", handlers.HandleGetCommentByID)

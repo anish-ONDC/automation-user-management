@@ -43,6 +43,10 @@ func main() {
 		log.Println("Warning: Failed to create indexes for comments:", err)
 	}
 
+	if err := database.EnsureUserIndexes(); err != nil {
+		log.Println("Warning: Failed to create indexes for users:", err)
+	}
+
 	if err := database.EnsureMCPKeyIndexes(); err != nil {
 		log.Println("Warning: Failed to create indexes for mcp_keys:", err)
 	}

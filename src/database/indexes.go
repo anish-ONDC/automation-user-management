@@ -101,3 +101,36 @@ func EnsureMCPKeyIndexes() error {
 	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{userIndex, hashIndex})
 	return err
 }
+
+// EnsureUserIndexes creates the indexes Login via ONDC relies on.
+func EnsureUserIndexes() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	collection := GetCollection("users")
+
+	// One row per ONDC user. Partial, because GitHub users have no ondc_user_id
+	// and a plain unique index would treat all of them as the same empty value.
+	ondcIndex := mongo.IndexModel{
+		Keys: bson.D{{Key: "ondc_user_id", Value: 1}},
+		Options: options.Index().
+			SetName("users_ondc_user_id").
+			SetUnique(true).
+			SetPartialFilterExpression(bson.M{"ondc_user_id": bson.M{"$exists": true}}),
+	}
+
+	// Both logins look users up by email. Not unique: GitHub users can have no email.
+	emailIndex := mongo.IndexModel{
+		Keys:    bson.D{{Key: "email", Value: 1}},
+		Options: options.Index().SetName("users_email"),
+	}
+
+	// Lists the users of an organisation.
+	orgIndex := mongo.IndexModel{
+		Keys:    bson.D{{Key: "organisations.organisation_id", Value: 1}},
+		Options: options.Index().SetName("users_organisation_id"),
+	}
+
+	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{ondcIndex, emailIndex, orgIndex})
+	return err
+}

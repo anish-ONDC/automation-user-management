@@ -9,16 +9,24 @@ import (
 )
 
 func GenerateJWT(userID, email, username, avatarURL, firstName, lastName string) (string, error) {
-	claims := jwt.MapClaims{
-		"user_id":    userID,
-		"role":       "AUDITOR",
-		"email":      email,
-		"username":   username,
-		"avatar_url": avatarURL,
-		"first_name": firstName,
-		"last_name":  lastName,
-		"exp":        time.Now().Add(8 * time.Hour).Unix(),
+	return GenerateJWTWithExtra(userID, email, username, avatarURL, firstName, lastName, nil)
+}
+
+// GenerateJWTWithExtra adds claims (e.g. the ONDC organisation) on top of the
+// base set; extra keys never override the base claims.
+func GenerateJWTWithExtra(userID, email, username, avatarURL, firstName, lastName string, extra map[string]interface{}) (string, error) {
+	claims := jwt.MapClaims{}
+	for k, v := range extra {
+		claims[k] = v
 	}
+	claims["user_id"] = userID
+	claims["role"] = "AUDITOR"
+	claims["email"] = email
+	claims["username"] = username
+	claims["avatar_url"] = avatarURL
+	claims["first_name"] = firstName
+	claims["last_name"] = lastName
+	claims["exp"] = time.Now().Add(8 * time.Hour).Unix()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(config.JWTSecret))
 }

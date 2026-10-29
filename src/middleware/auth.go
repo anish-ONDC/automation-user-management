@@ -54,5 +54,16 @@ func IsAuthenticated(c *fiber.Ctx) error {
 		c.Locals("last_name", lastName)
 	}
 
+	// Present only on tokens issued by Login via ONDC.
+	if provider, ok := claims["auth_provider"].(string); ok {
+		c.Locals("auth_provider", provider)
+	}
+	if orgID, ok := claims["org_id"].(string); ok {
+		c.Locals("org_id", orgID)
+	}
+	if orgName, ok := claims["org_name"].(string); ok {
+		c.Locals("org_name", orgName)
+	}
+
 	return c.Next()
 }
