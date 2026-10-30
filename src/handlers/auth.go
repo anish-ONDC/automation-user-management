@@ -329,88 +329,23 @@ func HandleONDCCallback(c *fiber.Ctx) error {
 		return fail(fiber.StatusInternalServerError, "saving user: "+err.Error())
 	}
 
-	// All organisations are saved on the user; the token carries only the one
-	// they work for: the one they chose last time, else the first.
-	org := pickOrganisation(user.Organisations, user.SelectedOrgID)
-	jwtToken, err := issueONDCToken(user.ID, info.UserID, info.Email, info.FirstName, info.LastName, org)
+	// All organisations are saved on the user. Until Product decides how a user
+	// with several picks one, the first goes into the token.
+	extra := map[string]interface{}{"auth_provider": config.LoginProviderONDC, "ondc_user_id": info.UserID}
+	if len(info.Organisations) > 0 {
+		org := info.Organisations[0]
+		extra["org_id"] = org.OrgID()
+		extra["org_name"] = org.OrganisationName
+	}
+	// The website links sessions and reports to username, so it must be unique
+	// and permanent: the ONDC user ID. The header shows first and last name.
+	username := strconv.FormatInt(info.UserID, 10)
+	jwtToken, err := utils.GenerateJWTWithExtra(user.ID.Hex(), info.Email, username, "", info.FirstName, info.LastName, extra)
 	if err != nil {
 		return fail(fiber.StatusInternalServerError, "generating token")
 	}
 
 	return redirectWithExchangeCode(c, jwtToken)
-}
-
-// issueONDCToken makes the Workbench token for an ONDC user working for org
-// (nil when NP Portal sent no organisations).
-func issueONDCToken(id primitive.ObjectID, ondcUserID int64, email, firstName, lastName string, org *models.UserOrganisation) (string, error) {
-	extra := map[string]interface{}{"auth_provider": config.LoginProviderONDC, "ondc_user_id": ondcUserID}
-	if org != nil {
-		extra["org_id"] = org.OrganisationID
-		extra["org_name"] = org.OrganisationName
-	}
-	// The website links sessions and reports to username, so it must be unique
-	// and permanent: the ONDC user ID. The header shows first and last name.
-	username := strconv.FormatInt(ondcUserID, 10)
-	return utils.GenerateJWTWithExtra(id.Hex(), email, username, "", firstName, lastName, extra)
-}
-
-// pickOrganisation returns the organisation with ID preferred, else the first.
-func pickOrganisation(orgs []models.UserOrganisation, preferred string) *models.UserOrganisation {
-	if len(orgs) == 0 {
-		return nil
-	}
-	for i := range orgs {
-		if preferred != "" && orgs[i].OrganisationID == preferred {
-			return &orgs[i]
-		}
-	}
-	return &orgs[0]
-}
-
-// HandleSelectOrganisation switches the organisation an ONDC user works for.
-// The user must belong to it (checked against the database, not the request),
-// and gets a new token carrying it. The choice is kept for the next login.
-func HandleSelectOrganisation(c *fiber.Ctx) error {
-	if provider, _ := c.Locals("auth_provider").(string); provider != config.LoginProviderONDC {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "only Login via ONDC users have organisations"})
-	}
-	var body struct {
-		OrganisationID string `json:"organisationId"`
-	}
-	if err := c.BodyParser(&body); err != nil || strings.TrimSpace(body.OrganisationID) == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "organisationId is required"})
-	}
-	userID, _ := c.Locals("user_id").(string)
-	id, err := primitive.ObjectIDFromHex(userID)
-	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid token"})
-	}
-	var u models.User
-	if err := database.FindOne("users", bson.M{"_id": id}, &u); err != nil {
-		if err == mongo.ErrNoDocuments {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "user not found"})
-		}
-		log.Printf("select organisation: loading user %s: %v", userID, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "could not load user"})
-	}
-	var org *models.UserOrganisation
-	for i := range u.Organisations {
-		if u.Organisations[i].OrganisationID == body.OrganisationID {
-			org = &u.Organisations[i]
-			break
-		}
-	}
-	if org == nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "you are not a member of this organisation"})
-	}
-	if _, err := database.UpdateOne("users", bson.M{"_id": id}, bson.M{"$set": bson.M{"selected_org_id": org.OrganisationID}}); err != nil {
-		log.Printf("select organisation: saving choice for %s: %v", userID, err)
-	}
-	token, err := issueONDCToken(u.ID, u.ONDCUserID, u.Email, u.FirstName, u.LastName, org)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "could not generate token"})
-	}
-	return c.JSON(fiber.Map{"token": token})
 }
 
 // newRef returns a short random tag for one login attempt.
@@ -464,14 +399,13 @@ func saveONDCUser(info *ondc.UserInfo) (*models.User, error) {
 		if _, err := database.UpdateOne("users", bson.M{"_id": existing.ID}, bson.M{"$set": set}); err != nil {
 			return nil, err
 		}
-		existing.Organisations = orgs
 		return &existing, nil
 	case err == mongo.ErrNoDocuments:
 		set["_id"] = primitive.NewObjectID()
 		if _, err := database.CreateOne("users", set); err != nil {
 			return nil, err
 		}
-		return &models.User{ID: set["_id"].(primitive.ObjectID), Organisations: orgs}, nil
+		return &models.User{ID: set["_id"].(primitive.ObjectID)}, nil
 	default:
 		return nil, err
 	}

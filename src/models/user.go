@@ -23,8 +23,6 @@ type User struct {
 	ONDCStatus    int                `json:"ondc_status,omitempty" bson:"ondc_status,omitempty"`
 	Organisations []UserOrganisation `json:"organisations,omitempty" bson:"organisations,omitempty"`
 	LastLoginAt   time.Time          `json:"last_login_at,omitempty" bson:"last_login_at,omitempty"`
-	// The organisation the user last chose to work for; used again at the next login.
-	SelectedOrgID string `json:"selected_org_id,omitempty" bson:"selected_org_id,omitempty"`
 }
 
 type UserOrganisation struct {
