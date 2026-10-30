@@ -41,6 +41,7 @@ func Setup(app *fiber.App) {
 
 	// Auth
 	app.Get("/auth/api/me", auth, handlers.HandleMe)
+	app.Post("/auth/api/select-org", auth, handlers.HandleSelectOrganisation)
 
 	// Comments
 	app.Post("/api/comments", auth, handlers.HandleCreateComment)
