@@ -39,21 +39,60 @@ func HandleMe(c *fiber.Ctx) error {
 	authProvider, _ := c.Locals("auth_provider").(string)
 	orgID, _ := c.Locals("org_id").(string)
 	orgName, _ := c.Locals("org_name").(string)
-	return c.JSON(fiber.Map{
-		"ok": true,
-		"user": fiber.Map{
-			// githubId holds our own user ID; the name stays until the website stops reading it.
-			"githubId":         userID,
-			"username":         username,
-			"email":            email,
-			"avatarUrl":        avatarURL,
-			"firstName":        firstName,
-			"lastName":         lastName,
-			"authProvider":     authProvider,
-			"organisationId":   orgID,
-			"organisationName": orgName,
-		},
-	})
+	user := fiber.Map{
+		// githubId holds our own user ID; the name stays until the website stops reading it.
+		"githubId":         userID,
+		"username":         username,
+		"email":            email,
+		"avatarUrl":        avatarURL,
+		"firstName":        firstName,
+		"lastName":         lastName,
+		"authProvider":     authProvider,
+		"organisationId":   orgID,
+		"organisationName": orgName,
+	}
+	if authProvider == config.LoginProviderONDC {
+		addONDCProfile(user, userID)
+	}
+	return c.JSON(fiber.Map{"ok": true, "user": user})
+}
+
+// addONDCProfile adds what NP Portal sent at the last login (all organisations,
+// subscriber IDs). It comes from the database, not the token, so the token stays
+// small. If the lookup fails, the token's details are still returned.
+func addONDCProfile(user fiber.Map, userID string) {
+	id, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return
+	}
+	var u models.User
+	if err := database.FindOne("users", bson.M{"_id": id}, &u); err != nil {
+		log.Printf("loading ONDC profile for %s: %v", userID, err)
+		return
+	}
+	orgs := make([]fiber.Map, 0, len(u.Organisations))
+	for _, o := range u.Organisations {
+		subscriberIDs := o.SubscriberIDs
+		if subscriberIDs == nil {
+			subscriberIDs = []string{}
+		}
+		orgs = append(orgs, fiber.Map{
+			"organisationId":   o.OrganisationID,
+			"organisationName": o.OrganisationName,
+			"networkStatus":    o.NetworkStatus,
+			"participantId":    o.ParticipantID,
+			"npType":           o.NPType,
+			"isRepresentative": o.IsRepresentative,
+			"status":           o.Status,
+			"subscriberIds":    subscriberIDs,
+		})
+	}
+	user["ondcUserId"] = u.ONDCUserID
+	user["ondcStatus"] = u.ONDCStatus
+	user["organisations"] = orgs
+	if !u.LastLoginAt.IsZero() {
+		user["lastLoginAt"] = u.LastLoginAt
+	}
 }
 
 // HandleLogin initiates the OAuth flow
